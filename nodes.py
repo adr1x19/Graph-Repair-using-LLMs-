@@ -137,7 +137,7 @@ def manager(state: agent_state):
     
     list_of_inconsistencies=state["list_of_inconsistencies"]
     cycle_count = state.get("cycle_count", 0)
-    MAX_CYCLES = 50
+    MAX_CYCLES = 5
     
     message=None
     if len(list_of_inconsistencies) == 0 or cycle_count >= MAX_CYCLES:
