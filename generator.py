@@ -250,7 +250,7 @@ class Generator:
 
                     if v_type == "triple" and self.disallowed_patterns:
                         src, r, tgt = random.choice(list(self.disallowed_patterns))
-                        result = session.run(f"MATCH (a:{src}), (b:{tgt}) WHERE a.id <> b.id WITH a,b LIMIT 1 MERGE (a)-[:{r}]->(b) SET a.inconsistency='forbidden_triple' RETURN a")
+                        result = session.run(f"MATCH (a:{src}), (b:{tgt}) WHERE a.id <> b.id WITH a,b LIMIT 1 MERGE (a)-[:{r}]->(b) RETURN a")
                         inconsistency_query = f"MATCH (n1:{src})-[r:{r}]->(n2:{tgt}) RETURN n1, r, n2"
 
                     elif v_type == "cardinality":
@@ -262,7 +262,7 @@ class Generator:
                             result = session.run(f"""
                                  MATCH (a:{v}) WITH a LIMIT 1 MATCH (b) WHERE a <> b
                                  WITH a, collect(b)[0..{overflow}] as chosen UNWIND chosen AS b
-                                 MERGE (a)-[:{rule['rel_type']}]->(b) SET a.inconsistency='cardinality' RETURN a
+                                 MERGE (a)-[:{rule['rel_type']}]->(b)  RETURN a
                             """)
                             inconsistency_query = f"MATCH (n1:{v})-[r:{rule['rel_type']}]->(n2) RETURN n1, r, n2"
 
@@ -274,7 +274,7 @@ class Generator:
                             p1, p2 = rule["conflict_pair"]
                             result = session.run(f"""
                                 MATCH (a:{v}) WITH a LIMIT 1 MATCH (t1:{p1}), (t2:{p2}) WITH a,t1,t2 LIMIT 1 
-                                MERGE (a)-[:{rule['rel_type']}]->(t1) MERGE (a)-[:{rule['rel_type']}]->(t2) SET a.inconsistency='exclusive_violation' RETURN a
+                                MERGE (a)-[:{rule['rel_type']}]->(t1) MERGE (a)-[:{rule['rel_type']}]->(t2)  RETURN a
                             """)
                             inconsistency_query = f"MATCH (n1:{v})-[r1:{rule['rel_type']}]->(n2:{p1}), (n1)-[r2:{rule['rel_type']}]->(n3:{p2}) RETURN n1, r1, n2, r2, n3"
 
@@ -287,7 +287,7 @@ class Generator:
                                 MATCH (a:{v_type_node}), (b:{rule['trigger']}) WHERE a.id <> b.id WITH a, b LIMIT 1
                                 MERGE (a)-[:{rule['rel_type']}]->(b) WITH a
                                 OPTIONAL MATCH (a)-[r]->(c:{rule['required']}) DELETE r
-                                SET a.inconsistency = 'missing_dependency' RETURN a
+                                    RETURN a
                             """)
                             inconsistency_query = f"MATCH (n1:{v_type_node})-[r:{rule['rel_type']}]->(n2:{rule['trigger']}) RETURN n1, r, n2"
 
@@ -296,7 +296,7 @@ class Generator:
                             MATCH (a)-[r {{A1: 'active'}}]->(b)
                             WITH a, b LIMIT 1
                             SET a.date_val = b.date_val - duration('P10D')
-                            SET a.inconsistency = 'temporal_violation' RETURN a
+                             RETURN a
                         """)
                         inconsistency_query = f"MATCH (a)-[r {{A1: 'active'}}]->(b) WHERE a.date_val <= b.date_val RETURN a, r, b"
                         
@@ -308,7 +308,7 @@ class Generator:
                             WHERE n.x > {threshold}
                             WITH n LIMIT 1
                             SET n.x = {threshold} - 10
-                            SET n.inconsistency = 'property_x_violation' RETURN n
+                                RETURN n
                         """)
                         inconsistency_query = f"MATCH (n:{target_type}) WHERE n.x <= {threshold} RETURN n"
 
