@@ -12,19 +12,19 @@ from snapshot_tool import export_snapshot, restore_snapshot
 
 
 MODEL_LIST = [
-    "rule_based",
-    "gemma4:31b"
+    "gemma3:27b",
+    "gpt-oss:20b",
+    "qwen3.5:27b",
 ]
 
 
-NUM_NODES = 50
-NUM_ALLOWED = 20
-NUM_DISALLOWED = 5
+NUM_NODES = 10000
+NUM_ALLOWED = 1000
+NUM_DISALLOWED = 100
 
 
-
-LOG_DIR = "/scratch/hrishikesh/users/aadi_2023A7PS0130H/logsfiles"
-
+# ── Set once in main() ──────────────────────────────────────────────────────
+LOG_DIR = None
 
 
 def setup_logging(timestamp: str) -> str:
@@ -33,7 +33,6 @@ def setup_logging(timestamp: str) -> str:
     Nothing is printed to the terminal — all output goes to LOG_DIR.
     Returns the full path to the log file.
     """
-    os.makedirs(LOG_DIR, exist_ok=True)
     log_filename = os.path.join(LOG_DIR, f"benchmark_{timestamp}.log")
 
     root = logging.getLogger()
@@ -87,23 +86,25 @@ def build_repair_app():
 def generate_and_snapshot():
     """
     Generate clean graph → inject violations → snapshot both states.
-    Returns (snap_gold, snap_messy, list_of_inconsistencies).
+    Returns (snap_gold, snap_messy, list_of_inconsistencies, graph_metrics).
     """
     log.info("PHASE 1: Generating Graph & Injecting Inconsistencies")
 
     gen = Generator(config.NEO4J_URI, (config.NEO4J_USERNAME, config.NEO4J_PASSWORD))
 
+    # ── ontology goes into the run folder ──
+    ontology_path = os.path.join(LOG_DIR, "ontology_final.json")
 
     log.info("[1/6] Generating rules (allowed=%d, disallowed=%d)...",
              NUM_ALLOWED, NUM_DISALLOWED)
     gen.generate_rules(num_allowed=NUM_ALLOWED, num_disallowed=NUM_DISALLOWED)
-    gen.export_ontology("ontology_final.json")
-    log.debug("Ontology exported to ontology_final.json")
+    gen.export_ontology(ontology_path)
+    log.debug("Ontology exported to %s", ontology_path)
 
 
     evaluator = TailoredEvaluator(
         config.NEO4J_URI, config.NEO4J_USERNAME, config.NEO4J_PASSWORD,
-        "ontology_final.json"
+        ontology_path
     )
 
    
@@ -114,7 +115,7 @@ def generate_and_snapshot():
              len(snap_gold["nodes"]), len(snap_gold["edges"]))
 
     log.info("[3/6] Exporting snapshot_gold.cypher...")
-    export_snapshot("snapshot_gold.cypher")
+    export_snapshot(os.path.join(LOG_DIR, "snapshot_gold.cypher"))
 
    
     log.info("[4/6] Injecting violations...")
@@ -124,7 +125,7 @@ def generate_and_snapshot():
              len(snap_messy["nodes"]), len(snap_messy["edges"]))
 
     log.info("[5/6] Exporting snapshot_messy.cypher...")
-    export_snapshot("snapshot_messy.cypher")
+    export_snapshot(os.path.join(LOG_DIR, "snapshot_messy.cypher"))
 
     log.info("[6/6] Reading inconsistencies.txt...")
     list_of_inconsistencies = []
@@ -136,11 +137,15 @@ def generate_and_snapshot():
             log.debug("  [%d] %s", i, q)
     except FileNotFoundError:
         log.error("inconsistencies.txt not found!")
+    log.info("Calculating graph metrics for messy graph...")
+    graph_metrics = evaluator.get_graph_metrics("messy_graph",
+                                                 ontology_file=ontology_path)
+    log.info("Graph metrics: %s", graph_metrics)
 
     gen.close()
 
     log.info("Phase 1 complete — %d inconsistencies to repair.", len(list_of_inconsistencies))
-    return snap_gold, snap_messy, list_of_inconsistencies
+    return snap_gold, snap_messy, list_of_inconsistencies, graph_metrics
 
 
 
@@ -159,7 +164,7 @@ def run_model(model_name, snap_gold, snap_messy, list_of_inconsistencies):
 
     
     model_log.info("[1/4] Restoring messy graph from snapshot_messy.cypher...")
-    restore_snapshot("snapshot_messy.cypher")
+    restore_snapshot(os.path.join(LOG_DIR, "snapshot_messy.cypher"))
 
 
     model_log.info("[2/4] Building and invoking repair agent...")
@@ -178,7 +183,11 @@ def run_model(model_name, snap_gold, snap_messy, list_of_inconsistencies):
         "results": [],
         "query": "",
         "status": "",
-        "cycle_count": 0
+        "cycle_count": 0,
+        "iteration_count": 0,
+        "current_index": 0,
+        "repair_status_array": [False] * len(inconsistencies_copy),
+        "prev_repair_status_array": []
     }
 
     model_log.debug("Initial agent state: %s", {k: v for k, v in initial_state.items()
@@ -191,14 +200,15 @@ def run_model(model_name, snap_gold, snap_messy, list_of_inconsistencies):
 
  
     safe_name = model_name.replace(":", "_").replace("/", "_")
-    repaired_filename = f"snapshot_repaired_{safe_name}.cypher"
+    repaired_filename = os.path.join(LOG_DIR, f"snapshot_repaired_{safe_name}.cypher")
     model_log.info("[3/4] Exporting repaired snapshot: %s", repaired_filename)
     export_snapshot(repaired_filename)
 
+    ontology_path = os.path.join(LOG_DIR, "ontology_final.json")
     model_log.info("[4/4] Evaluating...")
     evaluator = TailoredEvaluator(
         config.NEO4J_URI, config.NEO4J_USERNAME, config.NEO4J_PASSWORD,
-        "ontology_final.json"
+        ontology_path
     )
     results = evaluator.evaluate(
         snap_gold, snap_messy,
@@ -251,20 +261,25 @@ def log_comparison_table(all_results):
 
 
 def main():
+    global LOG_DIR
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    # ── create the timestamped run folder at the original LOG_DIR location ──
+    LOG_DIR = f"/scratch/hrishikesh/users/aadi_2023A7PS0130H/logsfiles/benchmark_{timestamp}"
+    os.makedirs(LOG_DIR, exist_ok=True)
 
     log_filename = setup_logging(timestamp)
 
 
     log.info("Timestamp  : %s", timestamp)
+    log.info("Run folder : %s", LOG_DIR)
     log.info("Log file   : %s", log_filename)
     log.info("Models (%d): %s", len(MODEL_LIST), ", ".join(MODEL_LIST))
     log.info("Graph params: nodes=%d, allowed=%d, disallowed=%d",
              NUM_NODES, NUM_ALLOWED, NUM_DISALLOWED)
 
-
-    snap_gold, snap_messy, list_of_inconsistencies = generate_and_snapshot()
+    snap_gold, snap_messy, list_of_inconsistencies, graph_metrics = generate_and_snapshot()
 
 
     all_results = []
@@ -279,10 +294,11 @@ def main():
 
 
     log_comparison_table(all_results)
-
-    output_file = f"benchmark_results_{timestamp}.json"
+    output_file = os.path.join(LOG_DIR, f"benchmark_results_{timestamp}.json")
+    
     payload = {
         "timestamp": timestamp,
+        "run_folder": LOG_DIR,
         "log_file": log_filename,
         "models": MODEL_LIST,
         "graph_params": {
@@ -291,6 +307,7 @@ def main():
             "num_disallowed": NUM_DISALLOWED,
             "num_inconsistencies": len(list_of_inconsistencies)
         },
+        "graph_metrics": graph_metrics,
         "results": all_results
     }
     with open(output_file, "w") as f:
@@ -298,6 +315,7 @@ def main():
 
     log.info("Results JSON saved to: %s", output_file)
     log.info("Log saved to: %s", log_filename)
+    log.info("All outputs saved in: %s", LOG_DIR)
     log.info("Benchmark complete!")
 
 
