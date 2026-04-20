@@ -12,4 +12,9 @@ class agent_state(TypedDict):
     list_of_inconsistencies:list
     database_description:str
     cycle_count: int
+    total_tokens: int
+    iteration_count: int
+    repair_status_array: list
+    prev_repair_status_array: list
+    current_index: int
     
