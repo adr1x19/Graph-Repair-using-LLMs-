@@ -3,12 +3,14 @@ from ollama import Client
 from langgraph.graph import END
 from database import GraphDB
 from state import agent_state
-import config 
+import config
 from neo4j import GraphDatabase
-
-import logging 
+import logging
 import re
-from schema_extract import get_schema,get_structured_schema
+from schema_extract import get_schema, get_structured_schema
+from neo4j.exceptions import ClientError, CypherSyntaxError
+from prompts import DESCRIBE_QUERY_PROMPT, GENERATE_REPAIRS_PROMPT
+log = logging.getLogger("nodes")
 
 _CYPHER_START_RE = re.compile(r"\b(MATCH|MERGE|CREATE|DELETE|DETACH|SET|REMOVE|WITH|CALL|UNWIND)\b", re.IGNORECASE)
 
@@ -38,18 +40,26 @@ def describe_query(state:agent_state,query):
 
 
     database_description=state["database_description"]
-    print("The Description of the Input:")
-    fquestion = f"""
-    {database_description}
-    Describe this query:{query} in detail,make a short paragraph.
-    Return only the paragraph.
-    """
+    log.debug("Describing query for context: %s", query[:120])
+    fquestion = DESCRIBE_QUERY_PROMPT.format(
+        database_description=database_description,
+        query=query
+    )
     messages = [{"role": "user", "content": fquestion}]
 
-    for part in client.chat(config.OLLAMA_MODEL, messages=messages, stream=True):
-        print(part['message']['content'], end='', flush=True)
+    description_parts = []
+    tokens = 0
+    _llm_opts = {"seed": config.OLLAMA_SEED, "temperature": config.OLLAMA_TEMPERATURE}
+    for part in client.chat(config.OLLAMA_MODEL, messages=messages, stream=True,
+                            options=_llm_opts):
+        description_parts.append(part.get('message', {}).get('content', ''))
+        if 'eval_count' in part:
+            tokens += part['eval_count']
+        if 'prompt_eval_count' in part:
+            tokens += part['prompt_eval_count']
+    log.debug("Query description: %s", "".join(description_parts))
     
-    return query 
+    return "".join(description_parts), tokens
 
 def query_is_correct(string):
     cleaned = string.replace("```cypher", "").replace("```", "").strip()
@@ -60,13 +70,16 @@ def query_is_correct(string):
     if semicolon != -1:
         cleaned = cleaned[: semicolon + 1]
     cleaned = " ".join(cleaned.split())
-    print(cleaned)
+    log.debug("Cleaned repair query: %s", cleaned)
     return cleaned
 
 def generate_repairs(state: agent_state):
     query = state["query"]
-    database_description=state["database_description"]
-    formatted_inconsistency = describe_query(state,query)
+    database_description = state["database_description"]
+    total_tokens = state.get("total_tokens", 0)
+    log.info("Generating repair for inconsistency: %s", query[:120])
+    formatted_inconsistency, extra_tokens = describe_query(state, query)
+    total_tokens += extra_tokens
     repairs = ""
 
     try:
@@ -75,42 +88,42 @@ def generate_repairs(state: agent_state):
             headers=config.OLLAMA_AUTH_HEADER
         )
     except Exception as e:
-        logging.error("Failed Connection to Ollama")
-    
-    NEO4J_URL = state["login_url"]
-    NEO4J_PASSWORD = state["login_password"]
-    NEO4J_USER = state["login_user"]
+        log.error("Failed connection to Ollama: %s", e, exc_info=True)
 
-    
-
-    
-    fquestion = f"""
-    {database_description}
-    The database has inconsistencies that we want to remove.
-    One such inconsistency is{formatted_inconsistency}.
-    You can delete an edge, a node, replace a edge or replace a node. But only one change.
-    Please generate all possible queries that could fix this.
-    IMP:When generating the query also remember to use the description to retrieve the pattern then remove the inconsisteny.
-    Return only the cypher queries. For now only one.
-    Make sure it is in proper format with a semi-colon denoting the end.
-    (Generate the cypher queries only.)
-    """
+    fquestion = GENERATE_REPAIRS_PROMPT.format(
+        database_description=database_description,
+        formatted_inconsistency=formatted_inconsistency
+    )
 
     messages = [{"role": "user", "content": fquestion}]
 
-    print("The Generated Query for repair:\n")
-    for part in client.chat(config.OLLAMA_MODEL, messages=messages, stream=True):
-        repairs = repairs + part['message']['content']
+    log.info("Querying model '%s' for repair query...", config.OLLAMA_MODEL)
+    _llm_opts = {"seed": config.OLLAMA_SEED, "temperature": config.OLLAMA_TEMPERATURE}
+    for part in client.chat(config.OLLAMA_MODEL, messages=messages, stream=True,
+                            options=_llm_opts):
+        repairs = repairs + part.get('message', {}).get('content', '')
+        if 'eval_count' in part:
+            total_tokens += part['eval_count']
+        if 'prompt_eval_count' in part:
+            total_tokens += part['prompt_eval_count']
 
-    print(repairs)
-    repairs = query_is_correct(repairs)
-    return {"repairs": repairs}
+    log.info("Raw repair response: %s", repairs)
+    cleaned = query_is_correct(repairs)
+    if is_the_repair_query_correct(cleaned, state):
+        repairs = cleaned
+    else:
+        log.warning("Generated repair failed syntax check — will retry.")
+        cycle_count = state.get("cycle_count", 0) + 1
+        return {"repairs": repairs, "cycle_count": cycle_count, "total_tokens": total_tokens}
+
+    log.info("Final repair query: %s", repairs)
+    cycle_count = state.get("cycle_count", 0) + 1
+    return {"repairs": repairs, "cycle_count": cycle_count, "total_tokens": total_tokens}
 
 def retrieve(state: agent_state):
     curr_query = state["query"]
-    print(curr_query)
-    
-    
+    log.info("Retrieving inconsistency pattern: %s", curr_query)
+
     NEO4J_URL = state["login_url"]
     NEO4J_PASSWORD = state["login_password"]
     NEO4J_USER = state["login_user"]
@@ -119,7 +132,19 @@ def retrieve(state: agent_state):
     results = db.run_query(curr_query)
     db.close()
 
-    return {"results": results}
+    # Update the repair status for the current query
+    repair_status_array = list(state.get("repair_status_array", []))
+    query_index = state.get("current_index", 1) - 1  # current_index was already incremented by manager
+
+    if query_index < len(repair_status_array):
+        if len(results) == 0:
+            repair_status_array[query_index] = True
+            log.info("Retrieve returned 0 result(s). Marking query %d as repaired.", query_index)
+        else:
+            repair_status_array[query_index] = False
+            log.info("Retrieve returned %d result(s). Query %d still needs repair.", len(results), query_index)
+
+    return {"results": results, "repair_status_array": repair_status_array}
 
 def apply(state: agent_state):
     curr_query = state["repairs"]
@@ -128,73 +153,118 @@ def apply(state: agent_state):
     NEO4J_USER = state["login_user"]
 
     db = GraphDB(NEO4J_URL, NEO4J_USER, NEO4J_PASSWORD)
-    results = db.run_query(curr_query)
-    db.close()
+    try:
+        log.info("Applying repair query: %s", curr_query[:120])
+        db.run_query(curr_query)
+        log.info("Repair query applied successfully.")
+    except CypherSyntaxError as e:
+        log.error("Cypher syntax error while applying repair — query will be skipped. Error: %s", e)
+    except ClientError as e:
+        log.error("Neo4j client error while applying repair — query will be skipped. Error: %s", e)
+    except Exception as e:
+        log.error("Unexpected error while applying repair — query will be skipped. Error: %s", e, exc_info=True)
+    finally:
+        db.close()
 
 def manager(state: agent_state):
-    logging.basicConfig(level=logging.INFO,filename="log.log",filemode="w",
-                    format="%(asctime)s -%(levelname)s -%(message)s")
-    
-    list_of_inconsistencies=state["list_of_inconsistencies"]
-    cycle_count = state.get("cycle_count", 0)
-    MAX_CYCLES = 5
-    
-    message=None
-    if len(list_of_inconsistencies) == 0 or cycle_count >= MAX_CYCLES:
-    
-        message="EXIT"
-        if cycle_count >= MAX_CYCLES:
-            logging.warning(f"Manager has initiated an exit due to cycle limit ({MAX_CYCLES}).")
+    list_of_inconsistencies = state["list_of_inconsistencies"]
+    current_index = state.get("current_index", 0)
+    iteration_count = state.get("iteration_count", 0)
+    repair_status_array = list(state.get("repair_status_array", [False] * len(list_of_inconsistencies)))
+    prev_repair_status_array = list(state.get("prev_repair_status_array", []))
+
+    if len(list_of_inconsistencies) == 0:
+        log.info("Manager exiting: no inconsistencies to process.")
+        return {"status": "EXIT"}
+
+    # Check if we've completed a full pass through all inconsistencies
+    if current_index >= len(list_of_inconsistencies):
+        log.info("Completed iteration %d. repair_status_array=%s",
+                 iteration_count, repair_status_array)
+        # Stop if the repair status array is unchanged from the previous iteration
+        if repair_status_array == prev_repair_status_array:
+            log.info("Repair status unchanged from previous iteration — no further progress. Exiting.")
+            return {"status": "EXIT", "iteration_count": iteration_count,
+                    "repair_status_array": repair_status_array}
         else:
-            logging.info(f"Manager has intiated an exit .")
+            # Save current status as previous, start a new pass
+            prev_repair_status_array = list(repair_status_array)
+            iteration_count += 1
+            current_index = 0
+            log.info("Starting iteration %d.", iteration_count)
 
-    
-    else:
-        message=list_of_inconsistencies.pop()
-        logging.info(f"Manager has successfully gotten query:{message}")
-
-    
-
-        
-    
-    if message == "EXIT":
-        return {"status": "EXIT", "cycle_count": cycle_count + 1}
-    else:
-        return {"status": "Processing", "query": message, "cycle_count": cycle_count + 1}
+    message = list_of_inconsistencies[current_index]
+    log.info("Manager dispatching query [%d/%d] (iteration %d): %s",
+             current_index + 1, len(list_of_inconsistencies), iteration_count, message)
+    return {
+        "status": "Processing",
+        "query": message,
+        "cycle_count": 0,
+        "current_index": current_index + 1,
+        "iteration_count": iteration_count,
+        "repair_status_array": repair_status_array,
+        "prev_repair_status_array": prev_repair_status_array
+    }
 
 
 def check_manager_status(state: agent_state) -> Literal[END, "retrieve"]:
-    logging.info("Checking whether the user wants to exit or not.")
     status = state["status"]
     if status == "EXIT":
-        print("You have exited the process.")
-        logging.info("Successfully Exited. :)")
+        log.info("Manager status EXIT — finishing agent run.")
         return END
     else:
+        log.debug("Manager status Processing — routing to retrieve.")
         return "retrieve"
     
     
 
 def evaluate_retrieval_results(state: agent_state) -> Literal["manager", "generate_repairs"]:
-    logging.info("Checking whether the such patterns exist in the graph.")
-
-    if len(state["results"]) == 0:
-        print("No such patterns in the knowledge graph.")
+    result_count = len(state["results"])
+    if result_count == 0:
+        log.info("No pattern found in graph — skipping repair, returning to manager.")
         return "manager"
     else:
+        log.info("Pattern confirmed (%d result(s)) — routing to generate_repairs.", result_count)
         return "generate_repairs"
 
 def verify_repairs(state: agent_state) -> Literal["manager", "generate_repairs"]:
-    logging.info("Repairing the graph...")
+    log.info("Verifying repair by re-running inconsistency query...")
 
-    # Uses global config for connection as per original logic style
-    db = GraphDB(config.NEO4J_URL, config.NEO4J_USERNAME, config.NEO4J_PASSWORD)
-    logging.info("Applying the changes.")
-    
+    db = GraphDB(state["login_url"], state["login_user"], state["login_password"])
     results = db.run_query(state["query"])
     db.close()
+
+    cycle_count = state.get("cycle_count", 0)
+    MAX_CYCLES = 5
+
     if len(results) == 0:
-        print("Repairs were done.")
+        log.info("Repair verified — inconsistency no longer found. Returning to manager.")
         return "manager"
     else:
-        return "generate_repairs"
+        if cycle_count >= MAX_CYCLES:
+            log.warning("Repair incomplete after %d cycles. Giving up on query and moving to next.", cycle_count)
+            return "manager"
+        else:
+            log.warning("Repair incomplete — inconsistency still present (%d rows). Retrying (attempt %d/%d).",
+                        len(results), cycle_count + 1, MAX_CYCLES)
+            return "generate_repairs"
+
+def is_the_repair_query_correct(query: str, state: agent_state) -> bool:
+    """Run EXPLAIN on the query to validate syntax before applying it."""
+    explain_query = "EXPLAIN " + query
+    db = GraphDB(state["login_url"], state["login_user"], state["login_password"])
+    try:
+        db.run_query(explain_query)
+        log.debug("Syntax check passed for query: %s", query[:120])
+        return True
+    except CypherSyntaxError as e:
+        log.warning("Cypher syntax error in generated repair: %s", e)
+        return False
+    except ClientError as e:
+        log.warning("Client error during syntax check: %s", e)
+        return False
+    except Exception as e:
+        log.warning("Unexpected error during syntax check: %s", e, exc_info=True)
+        return False
+    finally:
+        db.close()
