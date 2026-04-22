@@ -1,0 +1,6 @@
+MATCH (n1:N2)-[r:R2]->(n2:N2) RETURN n1, r, n2
+MATCH (n1:N5)-[r:R3]->(n2) WITH n1, count(r) AS deg WHERE deg > 3 RETURN n1
+MATCH (n1:N1)-[r1:R1]->(n2:N5), (n1)-[r2:R1]->(n3:N4) RETURN n1, r1, n2, r2, n3
+MATCH (n1:N3)-[r:R2]->(n2:N1) WHERE NOT (n1)-[:R2]->(:N4) RETURN n1, r, n2
+MATCH (a)-[r {A1: 'active'}]->(b) WHERE a.date_val <= b.date_val RETURN a, r, b
+MATCH (n:N3) WHERE n.x <= 30 RETURN n

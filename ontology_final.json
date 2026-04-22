@@ -1,0 +1,168 @@
+{
+  "triples": {
+    "allowed": [
+      [
+        "N2",
+        "R4",
+        "N2"
+      ],
+      [
+        "N4",
+        "R1",
+        "N3"
+      ],
+      [
+        "N5",
+        "R4",
+        "N1"
+      ],
+      [
+        "N2",
+        "R3",
+        "N2"
+      ],
+      [
+        "N5",
+        "R3",
+        "N4"
+      ],
+      [
+        "N1",
+        "R2",
+        "N4"
+      ],
+      [
+        "N3",
+        "R1",
+        "N5"
+      ],
+      [
+        "N5",
+        "R2",
+        "N4"
+      ],
+      [
+        "N1",
+        "R1",
+        "N4"
+      ],
+      [
+        "N5",
+        "R1",
+        "N2"
+      ],
+      [
+        "N1",
+        "R4",
+        "N2"
+      ],
+      [
+        "N1",
+        "R3",
+        "N3"
+      ],
+      [
+        "N3",
+        "R3",
+        "N2"
+      ],
+      [
+        "N4",
+        "R1",
+        "N1"
+      ],
+      [
+        "N1",
+        "R3",
+        "N5"
+      ],
+      [
+        "N4",
+        "R3",
+        "N5"
+      ],
+      [
+        "N1",
+        "R4",
+        "N1"
+      ],
+      [
+        "N5",
+        "R3",
+        "N2"
+      ],
+      [
+        "N4",
+        "R2",
+        "N3"
+      ],
+      [
+        "N1",
+        "R1",
+        "N3"
+      ]
+    ],
+    "disallowed": [
+      [
+        "N1",
+        "R4",
+        "N3"
+      ],
+      [
+        "N4",
+        "R3",
+        "N2"
+      ],
+      [
+        "N2",
+        "R2",
+        "N2"
+      ],
+      [
+        "N5",
+        "R2",
+        "N1"
+      ],
+      [
+        "N4",
+        "R2",
+        "N2"
+      ]
+    ]
+  },
+  "neighborhood_constraints": {
+    "N1": {
+      "type": "exclusive",
+      "conflict_pair": [
+        "N5",
+        "N4"
+      ],
+      "rel_type": "R1"
+    },
+    "N2": {
+      "type": "temporal",
+      "target": "N5",
+      "rel_type": "R4"
+    },
+    "N3": {
+      "type": "dependency",
+      "trigger": "N1",
+      "required": "N4",
+      "rel_type": "R2"
+    },
+    "N4": {
+      "type": "max_degree",
+      "limit": 3,
+      "rel_type": "R3"
+    },
+    "N5": {
+      "type": "max_degree",
+      "limit": 3,
+      "rel_type": "R3"
+    }
+  },
+  "property_constraint": {
+    "node_type": "N3",
+    "threshold": 30
+  }
+}
