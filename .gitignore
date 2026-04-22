@@ -1,0 +1,10 @@
+# Python cache
+__pycache__/
+*.pyc
+
+#overlap gen
+overlap_gen.py
+inconsistencies_overlap.txt
+ontology_overlap.json
+inconsistencies.txt
+ontology_final.json

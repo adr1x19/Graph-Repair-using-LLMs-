@@ -1,6 +1,9 @@
 import json
 import config
+from database import GraphDB
+from ontology import OntologyGenerator
 from generator import Generator 
+from injector import ViolationInjector
 from evaluator import TailoredEvaluator 
 from langgraph.graph import StateGraph, START
 from state import agent_state
@@ -37,22 +40,25 @@ def build_repair_app():
     return workflow.compile()
 
 def run_experiment():
-    gen = Generator(config.NEO4J_URI, (config.NEO4J_USERNAME, config.NEO4J_PASSWORD))
+    db = GraphDB(config.NEO4J_URI, config.NEO4J_USERNAME, config.NEO4J_PASSWORD)
     
     print("Generating Graph Rules...")
-    gen.generate_rules(num_allowed=20, num_disallowed=5)
-    gen.export_ontology("ontology_final.json")
+    onto = OntologyGenerator()
+    onto.generate_rules(num_allowed=20, num_disallowed=5)
+    onto.export_ontology("ontology_final.json")
     
     evaluator = TailoredEvaluator(config.NEO4J_URI, config.NEO4J_USERNAME, config.NEO4J_PASSWORD, "ontology_final.json")
 
     print("Generating Clean Graph...")
+    gen = Generator(db, onto)
     gen.generate_valid_graph(num_nodes=50)
     snap_gold = evaluator.fetch_snapshot()
     print("Exporting snapshot of clean graph...")
     export_snapshot("snapshot_gold.cypher")
 
     print("Injecting Violations...")
-    gen.inject_violations()
+    injector = ViolationInjector(db, onto)
+    injector.inject_violations()
     snap_messy = evaluator.fetch_snapshot()
     print("Exporting snapshot of messy graph...")
     export_snapshot("snapshot_messy.cypher")
@@ -92,7 +98,7 @@ def run_experiment():
     print("\n--- EXPERIMENT RESULTS ---")
     print(json.dumps(results, indent=4))
     
-    gen.close()
+    db.close()
 
 if __name__ == "__main__":
     print(f"Using Model: {config.OLLAMA_MODEL}")
