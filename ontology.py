@@ -37,7 +37,8 @@ class OntologyGenerator:
             threshold_val = random.randint(*config.PROPERTY_THRESHOLD_RANGE)
             self.property_constraint = {
                 "node_type": target_type,
-                "threshold": threshold_val
+                "threshold": threshold_val,
+                "operator": random.choice([">", "<"])
             }
 
         # Neighborhood Constraints
@@ -74,19 +75,19 @@ class OntologyGenerator:
                         "rel_type": random.choice(all_rel_types)
                     }
             
-            # Temporal Rule
+            # Comparison Rule
             else:
                 others = [t for t in all_node_types if t != n_type]
                 if others:
                     target = random.choice(others)
                     self.neighborhood_rules[n_type] = {
-                        "type": "temporal",
+                        "type": "comparison",
                         "target": target,
                         "rel_type": random.choice(all_rel_types) 
                     }
 
         # Guarantee Blocks
-        self._ensure_rule("temporal", all_node_types, all_rel_types)
+        self._ensure_rule("comparison", all_node_types, all_rel_types)
         self._ensure_rule("dependency", all_node_types, all_rel_types)
         self._ensure_rule("max_degree", all_node_types, all_rel_types)
         self._ensure_rule("exclusive", all_node_types, all_rel_types)
@@ -97,9 +98,9 @@ class OntologyGenerator:
             fallback_type = random.choice(unassigned if unassigned else all_node_types)
             others = [t for t in all_node_types if t != fallback_type]
             
-            if rule_type == "temporal":
+            if rule_type == "comparison":
                 self.neighborhood_rules[fallback_type] = {
-                    "type": "temporal",
+                    "type": "comparison",
                     "target": random.choice(others),
                     "rel_type": random.choice(all_rel_types)
                 }

@@ -27,7 +27,7 @@ class TailoredEvaluator:
                     'date': str(rec['dt']) if rec['dt'] else None
                 }
             
-            # Capture Edges and the A1 temporal attribute
+            # Capture Edges and the A1 comparison attribute
             res_edges = session.run("MATCH (n)-[r]->(m) RETURN n.id as src, type(r) as rel, m.id as tgt, r.A1 as A1")
             for rec in res_edges:
                 edges.append({

@@ -1,5 +1,4 @@
 import random
-from datetime import date, timedelta
 import config
 
 class Generator:
@@ -16,13 +15,13 @@ class Generator:
         for i in range(1, config.NUM_NODE_TYPES + 1):
             self.db.run_query(f"CREATE INDEX IF NOT EXISTS FOR (n:N{i}) ON (n.id)")
             
-        print(f"Created nodes with Native Date attributes...")
+        print(f"Created nodes with integer attributes (prop)...")
         
-        needs_date = set()
+        needs_prop = set()
         for src_type, rule in self.ontology.neighborhood_rules.items():
-            if rule["type"] == "temporal":
-                needs_date.add(src_type)        
-                needs_date.add(rule["target"])
+            if rule["type"] == "comparison":
+                needs_prop.add(src_type)        
+                needs_prop.add(rule["target"])
         
         needs_prop_x = set()
         if self.ontology.property_constraint:
@@ -35,17 +34,19 @@ class Generator:
             
             props_dict={"id":uid}
             
-            if n_type in needs_date:
-                start_dt = date.fromisoformat(config.START_DATE)
-                end_dt = date.fromisoformat(config.END_DATE)
-                delta = end_dt - start_dt
-                random_days = random.randint(0, delta.days)
-                random_date = start_dt + timedelta(days=random_days)
-                props_dict["date_val"] = random_date
+            if n_type in needs_prop:
+                props_dict["prop"] = random.randint(config.PROP_MIN_VAL, config.PROP_MAX_VAL)
                
             if n_type in needs_prop_x:
-                limit = self.ontology.property_constraint["threshold"]
-                x_val = random.randint(limit + 1, 100)
+                constraint = self.ontology.property_constraint
+                limit = constraint["threshold"]
+                op = constraint.get("operator", ">") # Default to > for backward compatibility
+                
+                if op == ">":
+                    x_val = random.randint(limit + 1, config.PROPERTY_MAX_VALUE)
+                else: # op == "<"
+                    x_val = random.randint(0, limit - 1)
+                
                 props_dict["x"] = x_val
 
             self.db.run_query(f"CREATE (n:{n_type} $props)", params={"props": props_dict}) 
@@ -61,7 +62,7 @@ class Generator:
             exclusive_forbidden = set()
             exclusive_rule = None
             dependency_rule = None 
-            temporal_rule = None
+            comparison_rule = None
             
             if src_type in self.ontology.neighborhood_rules:
                 rule = self.ontology.neighborhood_rules[src_type]
@@ -71,8 +72,8 @@ class Generator:
                     exclusive_rule = rule
                 elif rule["type"] == "dependency":
                     dependency_rule = rule
-                elif rule["type"] == "temporal":
-                    temporal_rule = rule
+                elif rule["type"] == "comparison":
+                    comparison_rule = rule
 
             connections_made = 0
             inner_targets = list(node_ids)
@@ -101,12 +102,12 @@ class Generator:
                 if possible_rels and random.random() < config.RELATION_CREATION_PROBABILITY:
                     r_type = random.choice(possible_rels)
                     
-                    if temporal_rule and tgt_type == temporal_rule["target"] and r_type == temporal_rule["rel_type"]:
+                    if comparison_rule and tgt_type == comparison_rule["target"] and r_type == comparison_rule["rel_type"]:
                         self.db.run_query(f"""
                             MATCH (a:{src_type} {{id: '{src_id}'}})
                             MATCH (b:{tgt_type} {{id: '{tgt_id}'}})
-                            WHERE a.date_val <= b.date_val
-                            SET a.date_val = b.date_val + duration('P1D')
+                            WHERE a.prop <= b.prop
+                            SET a.prop = b.prop + {config.COMPARISON_INCREMENT}
                         """)
                         
                         self.db.run_query(f"""
